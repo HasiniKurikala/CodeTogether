@@ -12,7 +12,7 @@ const LANGUAGES = [
 export default function Editor({
   code = '// Start coding here...\n',
   language = 'javascript',
-  onChange = () => {},
+  onChange = () => { },
   readOnly = false
 }) {
   return (
