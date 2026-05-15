@@ -14,9 +14,30 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
 }
 
-// Initialize Firebase
-export const app = initializeApp(firebaseConfig)
-export const auth = getAuth(app)
-export const database = getDatabase(app)
+let app = null
+let auth = null
+let database = null
+
+const hasFirebaseConfig = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId)
+
+if (hasFirebaseConfig) {
+  try {
+    app = initializeApp(firebaseConfig)
+    auth = getAuth(app)
+    database = getDatabase(app)
+  } catch (err) {
+    // Initialization failure (invalid keys, environment issues) — log and continue without Firebase
+    // eslint-disable-next-line no-console
+    console.warn('Firebase initialization failed:', err.message || err)
+    app = null
+    auth = null
+    database = null
+  }
+} else {
+  // eslint-disable-next-line no-console
+  console.warn('Firebase not configured — continuing without auth/database. Set VITE_FIREBASE_* env vars to enable Firebase.')
+}
+
+export { app, auth, database }
 
 export default { app, auth, database }

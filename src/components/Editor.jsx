@@ -29,7 +29,7 @@ export default function Editor({
         <label style={{ color: '#fff', fontSize: '14px' }}>Language:</label>
         <select
           value={language}
-          onChange={(e) => onChange({ ...undefined, language: e.target.value })}
+          onChange={(e) => onChange({ language: e.target.value })}
           disabled={readOnly}
           style={{
             padding: '6px 10px',

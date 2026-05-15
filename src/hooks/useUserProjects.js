@@ -15,6 +15,11 @@ export function useUserProjects() {
 
   // Listen to auth state
   useEffect(() => {
+    if (!auth) {
+      setIsLoading(false)
+      return undefined
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser)
       if (!nextUser) {
@@ -22,6 +27,7 @@ export function useUserProjects() {
         setIsLoading(false)
       }
     })
+
     return () => unsubscribe()
   }, [])
 
