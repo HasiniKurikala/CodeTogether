@@ -3,6 +3,7 @@ const { spawn } = require('child_process')
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const os = require('os')
 const WebSocket = require('ws')
 
 const app = express()
@@ -10,6 +11,9 @@ const PORT = process.env.PORT || 3001
 const EXEC_TIMEOUT_MS = Number(process.env.EXEC_TIMEOUT_MS || 30000)
 const server = http.createServer(app)
 const terminalRooms = new Map()
+
+const GCC_PATH = 'C:\\MinGW\\bin\\gcc.exe'
+const GPP_PATH = 'C:\\MinGW\\bin\\g++.exe'
 
 app.use(express.json({ limit: '100kb' }))
 app.use((req, res, next) => {
@@ -42,16 +46,129 @@ function broadcastToRoom(room, payload) {
 
 function stopActiveRun(room, reason = 'replaced') {
   if (!room?.activeRun?.process) return
-  const { process: docker } = room.activeRun
+  const { process: proc } = room.activeRun
   room.activeRun = null
   try {
-    if (docker.exitCode === null) docker.kill('SIGKILL')
+    if (proc.exitCode === null) proc.kill('SIGKILL')
   } catch (e) {}
   if (reason === 'replaced') {
     broadcastToRoom(room, { type: 'status', status: 'stopped' })
   }
 }
 
+// --- Native MinGW execution for C and C++ ---
+function startNativeRun(roomId, language, sourceCode) {
+  const room = getTerminalRoom(roomId)
+  stopActiveRun(room, 'replaced')
+
+  const tmpDir = os.tmpdir()
+  const isC = language === 'c'
+  const srcFile = path.join(tmpDir, isC ? 'main.c' : 'main.cpp')
+  const outFile = path.join(tmpDir, 'main.exe')
+  const compiler = isC ? GCC_PATH : GPP_PATH
+  const compileArgs = isC
+    ? [srcFile, '-o', outFile]
+    : [srcFile, '-O2', '-std=c++17', '-o', outFile]
+
+  fs.writeFileSync(srcFile, sourceCode, 'utf8')
+
+  broadcastToRoom(room, { type: 'status', status: 'running', language })
+
+  // Step 1: compile
+  const compile = spawn(compiler, compileArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
+
+  let compileErr = ''
+  compile.stderr.on('data', (chunk) => { compileErr += chunk.toString() })
+
+  compile.on('error', (err) => {
+    broadcastToRoom(room, { type: 'error', message: `Compiler not found: ${err.message}` })
+    if (room.activeRun === runState) room.activeRun = null
+  })
+
+  const runState = { process: compile, roomId, language }
+  room.activeRun = runState
+
+  compile.on('close', (code) => {
+    if (room.activeRun !== runState) return
+
+    if (code !== 0) {
+      broadcastToRoom(room, { type: 'output', stream: 'stderr', data: compileErr })
+      broadcastToRoom(room, { type: 'exit', code })
+      if (room.activeRun === runState) room.activeRun = null
+      return
+    }
+
+    // Step 2: run the compiled exe
+    const run = spawn(outFile, [], { stdio: ['pipe', 'pipe', 'pipe'] })
+    runState.process = run
+
+    run.stdout.on('data', (chunk) => {
+      broadcastToRoom(room, { type: 'output', stream: 'stdout', data: chunk.toString() })
+    })
+
+    run.stderr.on('data', (chunk) => {
+      broadcastToRoom(room, { type: 'output', stream: 'stderr', data: chunk.toString() })
+    })
+
+    run.on('error', (err) => {
+      if (room.activeRun !== runState) return
+      broadcastToRoom(room, { type: 'error', message: err.message })
+      if (room.activeRun === runState) room.activeRun = null
+    })
+
+    run.on('close', (exitCode) => {
+      if (room.activeRun !== runState) return
+      if (room.activeRun === runState) room.activeRun = null
+      broadcastToRoom(room, { type: 'exit', code: exitCode })
+      // Clean up exe
+      try { fs.unlinkSync(outFile) } catch (e) {}
+    })
+  })
+
+  return runState
+}
+
+function startNodeRun(roomId, sourceCode) {
+  const room = getTerminalRoom(roomId)
+  stopActiveRun(room, 'replaced')
+
+  const tmpFile = path.join(os.tmpdir(), 'main.js')
+  fs.writeFileSync(tmpFile, sourceCode, 'utf8')
+
+  broadcastToRoom(room, { type: 'status', status: 'running', language: 'javascript' })
+
+  const node = spawn('C:\\Program Files\\node.exe', [tmpFile], {
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+
+  const runState = { process: node, roomId, language: 'javascript' }
+  room.activeRun = runState
+
+  node.stdout.on('data', (chunk) => {
+    broadcastToRoom(room, { type: 'output', stream: 'stdout', data: chunk.toString() })
+  })
+
+  node.stderr.on('data', (chunk) => {
+    broadcastToRoom(room, { type: 'output', stream: 'stderr', data: chunk.toString() })
+  })
+
+  node.on('error', (err) => {
+    if (room.activeRun !== runState) return
+    broadcastToRoom(room, { type: 'error', message: err.message })
+    if (room.activeRun === runState) room.activeRun = null
+  })
+
+  node.on('close', (code) => {
+    if (room.activeRun !== runState) return
+    if (room.activeRun === runState) room.activeRun = null
+    broadcastToRoom(room, { type: 'exit', code })
+    try { fs.unlinkSync(tmpFile) } catch (e) {}
+  })
+
+  return runState
+}
+
+// --- Docker execution for Python, JavaScript, Java ---
 function startInteractiveDockerRun(roomId, language, sourceCode) {
   const room = getTerminalRoom(roomId)
   stopActiveRun(room, 'replaced')
@@ -59,9 +176,7 @@ function startInteractiveDockerRun(roomId, language, sourceCode) {
   const imageMap = {
     python: 'python:3.11-alpine',
     javascript: 'node:20-alpine',
-    c: 'gcc:14',
-    cpp: 'gcc:14',
-    java: 'openjdk:21-jdk-slim'
+    java: 'eclipse-temurin:21-jdk-alpine' 
   }
 
   const image = imageMap[language]
@@ -70,29 +185,24 @@ function startInteractiveDockerRun(roomId, language, sourceCode) {
     return
   }
 
-  // Pass code via base64 — avoids slow Windows volume mounts
   const encoded = Buffer.from(sourceCode).toString('base64')
 
   const runCmdMap = {
     python: `echo '${encoded}' | base64 -d > /tmp/main.py && python -u /tmp/main.py`,
-    javascript: `echo '${encoded}' | base64 -d > /tmp/main.js && node /tmp/main.js`,
-    c: `echo '${encoded}' | base64 -d > /tmp/main.c && gcc /tmp/main.c -o /tmp/out && /tmp/out`,
-    cpp: `echo '${encoded}' | base64 -d > /tmp/main.cpp && g++ /tmp/main.cpp -O2 -std=c++17 -o /tmp/out && /tmp/out`,
-    java: `echo '${encoded}' | base64 -d > /tmp/Main.java && javac /tmp/Main.java && java -cp /tmp Main`
+    javascript: `printf '%s' '${encoded}' | base64 -d > /tmp/main.js && node /tmp/main.js`,
+    java: `echo '${encoded}' | base64 -d > /tmp/source.java && CLASS=$(sed -n 's/.*public class \\([A-Za-z0-9_]*\\).*/\\1/p' /tmp/source.java | head -1) && cp /tmp/source.java /tmp/$CLASS.java && javac /tmp/$CLASS.java && java -cp /tmp $CLASS`
   }
 
   const runCmd = runCmdMap[language]
 
- const args = [
+  const args = [
     'run', '--rm', '--interactive',
     '--network', 'none',
     image,
     'sh', '-c', runCmd
   ]
 
-  const docker = spawn('docker', args, {
-    stdio: ['pipe', 'pipe', 'pipe']
-  })
+  const docker = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'] })
 
   const runState = { process: docker, roomId, language }
   room.activeRun = runState
@@ -151,7 +261,14 @@ wss.on('connection', (socket, request) => {
       const parsed = JSON.parse(payload)
 
       if (parsed?.type === 'run' && typeof parsed.language === 'string' && typeof parsed.sourceCode === 'string') {
-        startInteractiveDockerRun(roomId, parsed.language.toLowerCase(), parsed.sourceCode)
+        const lang = parsed.language.toLowerCase()
+if (lang === 'c' || lang === 'cpp') {
+          startNativeRun(roomId, lang, parsed.sourceCode)
+        } else if (lang === 'javascript') {
+          startNodeRun(roomId, parsed.sourceCode)
+        } else {
+          startInteractiveDockerRun(roomId, lang, parsed.sourceCode)
+        }
         return
       }
 

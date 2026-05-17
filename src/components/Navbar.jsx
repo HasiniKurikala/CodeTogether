@@ -39,7 +39,6 @@ export default function Navbar({ roomId, onRun, onShare }){
             <option value="javascript">JavaScript</option>
             <option value="python">Python</option>
             <option value="java">Java</option>
-            <option value="typescript">TypeScript</option>
           </select>
           <button onClick={onRun} style={{background:'#238636',color:'#fff',padding:'8px 14px',borderRadius:8,border:'none',fontWeight:700}}>Run</button>
         </div>

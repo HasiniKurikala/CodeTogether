@@ -244,7 +244,6 @@ export default function Home(){
                 <option value="javascript">JavaScript</option>
                 <option value="python">Python</option>
                 <option value="java">Java</option>
-                <option value="typescript">TypeScript</option>
               </select>
             </div>
             <div style={{display:'flex',justifyContent:'flex-end',gap:8}}>
