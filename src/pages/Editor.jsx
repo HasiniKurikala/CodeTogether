@@ -10,7 +10,7 @@ export default function Editor(){
   }
 
   return (
-    <main style={{display:'flex',height:'100vh'}}>
+    <main style={{height:'100vh'}}>
       <EditorPane roomId={roomId} />
     </main>
   )

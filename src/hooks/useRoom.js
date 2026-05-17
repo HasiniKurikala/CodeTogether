@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { ref, onValue, set, update } from 'firebase/database'
-import { database } from '../firebase/config'
+import { ref, onValue, set, update, onDisconnect } from 'firebase/database'
+import { database, auth } from '../firebase/config'
 
 const DEFAULT_ROOM = {
   code: '// Start coding...\n',
@@ -12,6 +12,7 @@ export default function useRoom(roomId) {
   const [code, setCode] = useState(DEFAULT_ROOM.code)
   const [language, setLanguage] = useState(DEFAULT_ROOM.language)
   const [users, setUsers] = useState(DEFAULT_ROOM.users)
+  const [name, setName] = useState(null)
 
   const debounceRef = useRef(null)
   const unsubscribeRef = useRef(null)
@@ -59,6 +60,7 @@ export default function useRoom(roomId) {
         setCode(DEFAULT_ROOM.code)
         setLanguage(DEFAULT_ROOM.language)
         setUsers(DEFAULT_ROOM.users)
+          setName(null)
         return
       }
 
@@ -66,6 +68,7 @@ export default function useRoom(roomId) {
       setCode(val.code ?? DEFAULT_ROOM.code)
       setLanguage(val.language ?? DEFAULT_ROOM.language)
       setUsers(val.users ?? DEFAULT_ROOM.users)
+        setName(val.name ?? null)
     })
 
     unsubscribeRef.current = unsub
@@ -77,6 +80,48 @@ export default function useRoom(roomId) {
         clearTimeout(debounceRef.current)
         debounceRef.current = null
       }
+    }
+  }, [roomId])
+
+  // Presence tracking effect
+  useEffect(() => {
+    if (!roomId) return undefined
+
+    const currentUser = auth.currentUser
+    
+    // Generate user ID: authenticated users use uid, guests use session storage ID
+    let userId
+    if (currentUser) {
+      userId = currentUser.uid
+    } else {
+      // Generate or retrieve guest session ID
+      const sessionKey = `guest_${roomId}`
+      let guestId = sessionStorage.getItem(sessionKey)
+      if (!guestId) {
+        guestId = 'guest_' + Math.random().toString(36).substr(2, 9)
+        sessionStorage.setItem(sessionKey, guestId)
+      }
+      userId = guestId
+    }
+
+    const userPresenceRef = ref(database, `rooms/${roomId}/users/${userId}`)
+    const displayName = currentUser?.displayName || 'Guest'
+
+    // Write presence data and set up auto-cleanup on disconnect
+    set(userPresenceRef, {
+      online: true,
+      joinedAt: new Date().toISOString(),
+      displayName: displayName
+    }).catch((err) => console.error('Failed to set user presence', err))
+
+    // Set up auto-removal on disconnect
+    onDisconnect(userPresenceRef)
+      .remove()
+      .catch((err) => console.error('Failed to set onDisconnect', err))
+
+    return () => {
+      // Clean up presence on unmount
+      set(userPresenceRef, null).catch(() => {})
     }
   }, [roomId])
 
@@ -123,5 +168,31 @@ export default function useRoom(roomId) {
     [roomId]
   )
 
-  return { code, language, users, updateCode, updateLanguage }
+  const updateRoomName = useCallback(
+    async (newName) => {
+      try {
+        const roomRef = ref(database, `rooms/${roomId}`)
+        await update(roomRef, { name: newName })
+      } catch (err) {
+        console.error('Failed to update room name', err)
+      }
+
+      try {
+        const user = auth.currentUser
+        if (user) {
+          const userRoomRef = ref(database, `users/${user.uid}/rooms/${roomId}`)
+          await update(userRoomRef, { name: newName })
+          const userProjectRef = ref(database, `users/${user.uid}/projects/${roomId}`)
+          await update(userProjectRef, { name: newName }).catch(() => {})
+        }
+      } catch (err) {
+        console.error('Failed to update user-saved room name', err)
+      }
+
+      setName(newName)
+    },
+    [roomId]
+  )
+
+  return { code, language, users, name, updateCode, updateLanguage, updateRoomName }
 }
