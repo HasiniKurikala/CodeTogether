@@ -298,6 +298,14 @@ if (lang === 'c' || lang === 'cpp') {
   })
 })
 
+// Pre-warm docker containers for faster first-run execution
+try {
+  spawn('docker', ['run', '--rm', 'python:3.11-alpine', 'python', '--version'], { stdio: 'ignore' })
+  spawn('docker', ['run', '--rm', 'eclipse-temurin:21-jdk-alpine', 'java', '--version'], { stdio: 'ignore' })
+} catch (err) {
+  // Docker Desktop may not be running
+}
+
 server.listen(PORT, () => {
   console.log(`[executor] API listening on http://localhost:${PORT}`)
 })

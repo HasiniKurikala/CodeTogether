@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { ref, onValue, set, update, onDisconnect } from 'firebase/database'
+import { onAuthStateChanged } from 'firebase/auth'
 import { database, auth } from '../firebase/config'
 
 const DEFAULT_ROOM = {
@@ -60,7 +61,7 @@ export default function useRoom(roomId) {
         setCode(DEFAULT_ROOM.code)
         setLanguage(DEFAULT_ROOM.language)
         setUsers(DEFAULT_ROOM.users)
-          setName(null)
+        setName(null)
         return
       }
 
@@ -68,7 +69,7 @@ export default function useRoom(roomId) {
       setCode(val.code ?? DEFAULT_ROOM.code)
       setLanguage(val.language ?? DEFAULT_ROOM.language)
       setUsers(val.users ?? DEFAULT_ROOM.users)
-        setName(val.name ?? null)
+      setName(val.name ?? null)
     })
 
     unsubscribeRef.current = unsub
@@ -87,41 +88,66 @@ export default function useRoom(roomId) {
   useEffect(() => {
     if (!roomId) return undefined
 
-    const currentUser = auth.currentUser
-    
-    // Generate user ID: authenticated users use uid, guests use session storage ID
-    let userId
-    if (currentUser) {
-      userId = currentUser.uid
-    } else {
-      // Generate or retrieve guest session ID
-      const sessionKey = `guest_${roomId}`
-      let guestId = sessionStorage.getItem(sessionKey)
-      if (!guestId) {
-        guestId = 'guest_' + Math.random().toString(36).substr(2, 9)
-        sessionStorage.setItem(sessionKey, guestId)
-      }
-      userId = guestId
+    // Generate or retrieve guest session ID
+    const sessionKey = `guest_${roomId}`
+    let guestId = sessionStorage.getItem(sessionKey)
+    if (!guestId) {
+      guestId = 'guest_' + Math.random().toString(36).substring(2, 9)
+      sessionStorage.setItem(sessionKey, guestId)
     }
 
-    const userPresenceRef = ref(database, `rooms/${roomId}/users/${userId}`)
-    const displayName = currentUser?.displayName || 'Guest'
+    let currentPresenceRef = null
 
-    // Write presence data and set up auto-cleanup on disconnect
-    set(userPresenceRef, {
-      online: true,
-      joinedAt: new Date().toISOString(),
-      displayName: displayName
-    }).catch((err) => console.error('Failed to set user presence', err))
+    const writePresence = (user) => {
+      const userId = user?.uid || guestId
+      const displayName = user?.displayName || (user?.email ? user.email.split('@')[0] : 'Guest')
+      const presenceData = {
+        online: true,
+        displayName: displayName,
+        joinedAt: new Date().toISOString()
+      }
 
-    // Set up auto-removal on disconnect
-    onDisconnect(userPresenceRef)
-      .remove()
-      .catch((err) => console.error('Failed to set onDisconnect', err))
+      if (!database) {
+        setUsers((prev) => ({
+          ...(prev || {}),
+          [userId]: presenceData
+        }))
+        return () => {}
+      }
 
-    return () => {
-      // Clean up presence on unmount
-      set(userPresenceRef, null).catch(() => {})
+      const userPresenceRef = ref(database, `rooms/${roomId}/users/${userId}`)
+      currentPresenceRef = userPresenceRef
+
+      set(userPresenceRef, presenceData).catch((err) => console.error('Failed to set user presence', err))
+
+      onDisconnect(userPresenceRef)
+        .remove()
+        .catch((err) => console.error('Failed to set onDisconnect', err))
+
+      return () => {
+        if (currentPresenceRef) {
+          set(currentPresenceRef, null).catch(() => {})
+        }
+      }
+    }
+
+    let cleanupPresence = () => {}
+
+    if (auth) {
+      const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+        cleanupPresence()
+        cleanupPresence = writePresence(currentUser)
+      })
+
+      return () => {
+        unsubscribeAuth()
+        cleanupPresence()
+      }
+    } else {
+      cleanupPresence = writePresence(null)
+      return () => {
+        cleanupPresence()
+      }
     }
   }, [roomId])
 
@@ -170,23 +196,33 @@ export default function useRoom(roomId) {
 
   const updateRoomName = useCallback(
     async (newName) => {
-      try {
-        const roomRef = ref(database, `rooms/${roomId}`)
-        await update(roomRef, { name: newName })
-      } catch (err) {
-        console.error('Failed to update room name', err)
-      }
-
-      try {
-        const user = auth.currentUser
-        if (user) {
-          const userRoomRef = ref(database, `users/${user.uid}/rooms/${roomId}`)
-          await update(userRoomRef, { name: newName })
-          const userProjectRef = ref(database, `users/${user.uid}/projects/${roomId}`)
-          await update(userProjectRef, { name: newName }).catch(() => {})
+      if (database) {
+        try {
+          const roomRef = ref(database, `rooms/${roomId}`)
+          await update(roomRef, { name: newName })
+        } catch (err) {
+          console.error('Failed to update room name', err)
         }
-      } catch (err) {
-        console.error('Failed to update user-saved room name', err)
+
+        try {
+          const user = auth?.currentUser
+          if (user) {
+            const userRoomRef = ref(database, `users/${user.uid}/rooms/${roomId}`)
+            await update(userRoomRef, { name: newName })
+            const userProjectRef = ref(database, `users/${user.uid}/projects/${roomId}`)
+            await update(userProjectRef, { name: newName }).catch(() => {})
+          }
+        } catch (err) {
+          console.error('Failed to update user-saved room name', err)
+        }
+      } else {
+        try {
+          const cached = JSON.parse(localStorage.getItem(`rooms/${roomId}`) || '{}')
+          cached.name = newName
+          localStorage.setItem(`rooms/${roomId}`, JSON.stringify(cached))
+        } catch (err) {
+          // ignore storage errors
+        }
       }
 
       setName(newName)

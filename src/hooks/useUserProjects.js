@@ -33,7 +33,7 @@ export function useUserProjects() {
 
   // Listen to user's projects
   useEffect(() => {
-    if (!user) {
+    if (!user || !database) {
       setIsLoading(false)
       return
     }
@@ -60,6 +60,7 @@ export function useUserProjects() {
     if (!user) {
       throw new Error('User not authenticated')
     }
+    if (!database) return
 
     const projectRef = ref(database, `users/${user.uid}/projects/${projectId}`)
     await set(projectRef, {
@@ -74,6 +75,7 @@ export function useUserProjects() {
     if (!user) {
       throw new Error('User not authenticated')
     }
+    if (!database) return
 
     const projectRef = ref(database, `users/${user.uid}/projects/${projectId}`)
     await remove(projectRef)
