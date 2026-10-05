@@ -7,6 +7,7 @@ import useRoom from '../hooks/useRoom'
 import { useUserProjects } from '../hooks/useUserProjects'
 import { useTheme } from '../context/ThemeContext'
 import Navbar from './Navbar'
+import TEMPLATES from '../utils/templates'
 
 export default function EditorPane({ roomId }) {
   const { theme } = useTheme()
@@ -22,6 +23,13 @@ export default function EditorPane({ roomId }) {
   const runStartRef = useRef(null)
   const inputBufferRef = useRef('')
 
+  const isLocalChange = useRef(false)
+  const codeRef = useRef(code)
+  const languageRef = useRef(language)
+  const connectTimeoutRef = useRef(null)
+  const toastTimeoutRef = useRef(null)
+
+  const [languageToast, setLanguageToast] = useState('')
   const [running, setRunning] = useState(false)
   const [editorHeightPct, setEditorHeightPct] = useState(65)
   const dragRef = useRef(null)
@@ -29,6 +37,15 @@ export default function EditorPane({ roomId }) {
   const containerRef = useRef(null)
   const [lastExecutionMs, setLastExecutionMs] = useState(null)
   const [hasBufferedInput, setHasBufferedInput] = useState(false)
+
+  // Keep refs in sync with current state
+  useEffect(() => {
+    codeRef.current = code
+  }, [code])
+
+  useEffect(() => {
+    languageRef.current = language
+  }, [language])
 
   // Font size control
   const [fontSize, setFontSize] = useState(() => {
@@ -51,7 +68,7 @@ export default function EditorPane({ roomId }) {
   useEffect(() => {
     try {
       localStorage.setItem('codetogether-fontsize', fontSize)
-    } catch {}
+    } catch { }
   }, [fontSize])
 
   // Auto-save on code/language change
@@ -74,7 +91,7 @@ export default function EditorPane({ roomId }) {
   useEffect(() => {
     if (!user) return undefined
     const id = setInterval(async () => {
-      try { await saveProject(roomId, { roomId, code, language, name: `Room ${roomId}` }) } catch (e) {}
+      try { await saveProject(roomId, { roomId, code, language, name: `Room ${roomId}` }) } catch (e) { }
     }, 30000)
     return () => clearInterval(id)
   }, [user, roomId, code, language, saveProject])
@@ -167,7 +184,13 @@ export default function EditorPane({ roomId }) {
 
     const onResize = () => {
       requestAnimationFrame(() => {
-        try { fitAddon.fit() } catch (e) {}
+        if (!terminalMountRef.current || !terminalRef.current) return
+        if (terminalMountRef.current.clientWidth === 0 || terminalMountRef.current.clientHeight === 0) return
+        try {
+          if (terminalRef.current.element && terminalRef.current.element.offsetParent !== null) {
+            fitAddon.fit()
+          }
+        } catch (e) { }
         if (socketRef.current?.readyState === WebSocket.OPEN && terminal.cols && terminal.rows) {
           socketRef.current.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }))
         }
@@ -177,17 +200,24 @@ export default function EditorPane({ roomId }) {
     const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onResize) : null
     resizeObserver?.observe(terminalMountRef.current)
     window.addEventListener('resize', onResize)
-    requestAnimationFrame(onResize)
 
     return () => {
       dataDisposable.dispose()
       resizeObserver?.disconnect()
       window.removeEventListener('resize', onResize)
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current)
+        connectTimeoutRef.current = null
+      }
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current)
+        toastTimeoutRef.current = null
+      }
       if (socketRef.current) {
         socketRef.current.close()
         socketRef.current = null
       }
-      try { terminal.dispose() } catch (e) {}
+      try { terminal.dispose() } catch (e) { }
       terminalRef.current = null
       fitAddonRef.current = null
       runningRef.current = false
@@ -209,14 +239,54 @@ export default function EditorPane({ roomId }) {
   // Refit when editor height changes
   useEffect(() => {
     requestAnimationFrame(() => {
-      try { fitAddonRef.current?.fit() } catch (e) {}
+      if (terminalMountRef.current && terminalMountRef.current.clientHeight > 0) {
+        try { fitAddonRef.current?.fit() } catch (e) { }
+      }
     })
   }, [editorHeightPct])
 
-  const handleEditorChange = ({ code: newCode, language: newLang }) => {
-    if (newCode !== undefined) updateCode(newCode)
-    if (newLang) updateLanguage(newLang)
-  }
+  // Bug 2: Language change handler that loads starter template and shows toast confirmation
+  const handleLanguageChange = useCallback((newLang) => {
+    updateLanguage(newLang)
+    languageRef.current = newLang
+
+    // Load starter template from src/utils/templates.js into editor
+    const starterTemplate = TEMPLATES[newLang]
+    if (starterTemplate) {
+      isLocalChange.current = true
+      codeRef.current = starterTemplate
+      updateCode(starterTemplate)
+    }
+
+    // Language change confirmation toast for 2 seconds
+    const langNames = {
+      javascript: 'JavaScript',
+      python: 'Python',
+      cpp: 'C++',
+      c: 'C',
+      java: 'Java'
+    }
+    const displayName = langNames[newLang] || newLang
+    setLanguageToast(`Language changed to ${displayName}`)
+
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current)
+    toastTimeoutRef.current = setTimeout(() => {
+      setLanguageToast('')
+      toastTimeoutRef.current = null
+    }, 2000)
+  }, [updateLanguage, updateCode])
+
+  // Bug 3: Editor change handler tracking local user changes to avoid cursor jumping
+  const handleEditorChange = useCallback(({ code: newCode, language: newLang }) => {
+    if (newCode !== undefined) {
+      isLocalChange.current = true
+      codeRef.current = newCode
+      updateCode(newCode)
+    }
+    if (newLang && newLang !== languageRef.current) {
+      handleLanguageChange(newLang)
+    }
+  }, [updateCode, handleLanguageChange])
 
   const handleSendInput = () => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return
@@ -229,9 +299,19 @@ export default function EditorPane({ roomId }) {
     setHasBufferedInput(false)
   }
 
+  // Bug 1 & Bug 2: Code execution with WebSocket connection error handling, timeout, and latest language
   const handleRunCode = useCallback(() => {
     const terminal = terminalRef.current
     if (!terminal) return
+
+    // Ensure we use the latest execution language and code
+    const currentLang = languageRef.current || language
+    const currentCode = codeRef.current !== undefined ? codeRef.current : code
+
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current)
+      connectTimeoutRef.current = null
+    }
 
     if (socketRef.current) {
       socketRef.current.close()
@@ -241,19 +321,70 @@ export default function EditorPane({ roomId }) {
     inputBufferRef.current = ''
     setHasBufferedInput(false)
     terminal.clear()
-    terminal.writeln(`\x1b[2mStarting ${language} execution...\x1b[0m`)
+    terminal.writeln(`\x1b[2mStarting ${currentLang} execution...\x1b[0m`)
     setLastExecutionMs(null)
     setRunning(true)
     runningRef.current = true
     runStartRef.current = Date.now()
 
-    const socket = new WebSocket(`ws://localhost:3001/terminal?roomId=${encodeURIComponent(roomId)}`)
-    socketRef.current = socket
+    let connectionEstablished = false
 
+    // Bug 1: 3-second timeout if WebSocket fails to connect
+    connectTimeoutRef.current = setTimeout(() => {
+      if (!connectionEstablished) {
+        terminal.writeln('\r\n\x1b[31m[Server not running — start with npm run dev]\x1b[0m')
+        setRunning(false)
+        runningRef.current = false
+        if (socketRef.current) {
+          try { socketRef.current.close() } catch (e) { }
+          socketRef.current = null
+        }
+      }
+    }, 3000)
+
+    let socket
+    try {
+      socket = new WebSocket(`ws://localhost:3001/terminal?roomId=${encodeURIComponent(roomId)}`)
+      socketRef.current = socket
+    } catch (err) {
+      clearTimeout(connectTimeoutRef.current)
+      connectTimeoutRef.current = null
+      terminal.writeln('\r\n\x1b[31m[Server not running — start with npm run dev]\x1b[0m')
+      setRunning(false)
+      runningRef.current = false
+      return
+    }
+
+    // Bug 1: onopen confirmation and error handling
     socket.onopen = () => {
-      socket.send(JSON.stringify({ type: 'run', roomId, language, sourceCode: code }))
-      if (terminal.cols && terminal.rows) {
-        socket.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }))
+      connectionEstablished = true
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current)
+        connectTimeoutRef.current = null
+      }
+      console.log('[EditorPane] WebSocket connection established to ws://localhost:3001/terminal')
+
+      try {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'run',
+            roomId,
+            language: currentLang,
+            sourceCode: currentCode
+          }))
+          if (terminal.cols && terminal.rows) {
+            socket.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }))
+          }
+        } else {
+          terminal.writeln('\r\n\x1b[31m[WebSocket connection not ready]\x1b[0m')
+          setRunning(false)
+          runningRef.current = false
+        }
+      } catch (err) {
+        console.error('[EditorPane] Failed to send run payload:', err)
+        terminal.writeln(`\r\n\x1b[31m[Execution error: ${err.message}]\x1b[0m`)
+        setRunning(false)
+        runningRef.current = false
       }
     }
 
@@ -261,7 +392,7 @@ export default function EditorPane({ roomId }) {
       const raw = typeof event.data === 'string' ? event.data : ''
       let parsed = null
       if (raw && raw.trim().startsWith('{')) {
-        try { parsed = JSON.parse(raw) } catch (e) {}
+        try { parsed = JSON.parse(raw) } catch (e) { }
       }
 
       if (parsed?.type === 'output' && typeof parsed.data === 'string') {
@@ -284,7 +415,7 @@ export default function EditorPane({ roomId }) {
           {
             id: Date.now(),
             time: new Date().toLocaleTimeString(),
-            language,
+            language: currentLang,
             durationMs: duration,
             code: parsed.code ?? 0
           },
@@ -304,12 +435,24 @@ export default function EditorPane({ roomId }) {
     }
 
     socket.onclose = () => {
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current)
+        connectTimeoutRef.current = null
+      }
       setRunning(false)
       runningRef.current = false
     }
 
     socket.onerror = () => {
-      terminal.writeln('\r\n\x1b[31m[connection error — is the backend server running?]\x1b[0m')
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current)
+        connectTimeoutRef.current = null
+      }
+      if (!connectionEstablished) {
+        terminal.writeln('\r\n\x1b[31m[Server not running — start with npm run dev]\x1b[0m')
+      } else {
+        terminal.writeln('\r\n\x1b[31m[connection error — is the backend server running?]\x1b[0m')
+      }
       setRunning(false)
       runningRef.current = false
     }
@@ -330,7 +473,7 @@ export default function EditorPane({ roomId }) {
   }, [handleRunCode])
 
   const handleClearTerminal = () => {
-    try { terminalRef.current?.clear() } catch (e) {}
+    try { terminalRef.current?.clear() } catch (e) { }
     terminalRef.current?.writeln('\x1b[2mTerminal cleared.\x1b[0m')
     inputBufferRef.current = ''
     setHasBufferedInput(false)
@@ -341,7 +484,7 @@ export default function EditorPane({ roomId }) {
       await navigator.clipboard.writeText(code)
       setCopiedCode(true)
       setTimeout(() => setCopiedCode(false), 2000)
-    } catch {}
+    } catch { }
   }
 
   const handleDownloadCode = () => {
@@ -366,7 +509,42 @@ export default function EditorPane({ roomId }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--background)' }}>
-      <Navbar roomId={roomId} onRun={handleRunCode} />
+      {/* Language Change Toast Notification */}
+      {languageToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed',
+            top: 72,
+            right: 20,
+            zIndex: 9999,
+            background: 'var(--surface-2, #2a160e)',
+            color: 'var(--accent, #FF9A86)',
+            border: '1px solid var(--accent, #FF9A86)',
+            padding: '8px 16px',
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+            fontWeight: 600,
+            fontSize: 13,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            pointerEvents: 'none'
+          }}
+        >
+          <span style={{ fontSize: 14 }}>✓</span>
+          <span>{languageToast}</span>
+        </div>
+      )}
+
+      <Navbar
+        roomId={roomId}
+        language={language}
+        users={users}
+        updateLanguage={handleLanguageChange}
+        onRun={handleRunCode}
+      />
 
       {/* Editor Sub-toolbar */}
       <div style={{

@@ -50,7 +50,7 @@ function stopActiveRun(room, reason = 'replaced') {
   room.activeRun = null
   try {
     if (proc.exitCode === null) proc.kill('SIGKILL')
-  } catch (e) {}
+  } catch (e) { }
   if (reason === 'replaced') {
     broadcastToRoom(room, { type: 'status', status: 'stopped' })
   }
@@ -121,7 +121,7 @@ function startNativeRun(roomId, language, sourceCode) {
       if (room.activeRun === runState) room.activeRun = null
       broadcastToRoom(room, { type: 'exit', code: exitCode })
       // Clean up exe
-      try { fs.unlinkSync(outFile) } catch (e) {}
+      try { fs.unlinkSync(outFile) } catch (e) { }
     })
   })
 
@@ -162,7 +162,47 @@ function startNodeRun(roomId, sourceCode) {
     if (room.activeRun !== runState) return
     if (room.activeRun === runState) room.activeRun = null
     broadcastToRoom(room, { type: 'exit', code })
-    try { fs.unlinkSync(tmpFile) } catch (e) {}
+    try { fs.unlinkSync(tmpFile) } catch (e) { }
+  })
+
+  return runState
+}
+
+function startNativePythonRun(roomId, sourceCode) {
+  const room = getTerminalRoom(roomId)
+  stopActiveRun(room, 'replaced')
+
+  const tmpFile = path.join(os.tmpdir(), 'main.py')
+  fs.writeFileSync(tmpFile, sourceCode, 'utf8')
+
+  broadcastToRoom(room, { type: 'status', status: 'running', language: 'python' })
+
+  const py = spawn('python', ['-u', tmpFile], {
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+
+  const runState = { process: py, roomId, language: 'python' }
+  room.activeRun = runState
+
+  py.stdout.on('data', (chunk) => {
+    broadcastToRoom(room, { type: 'output', stream: 'stdout', data: chunk.toString() })
+  })
+
+  py.stderr.on('data', (chunk) => {
+    broadcastToRoom(room, { type: 'output', stream: 'stderr', data: chunk.toString() })
+  })
+
+  py.on('error', (err) => {
+    if (room.activeRun !== runState) return
+    broadcastToRoom(room, { type: 'error', message: `Python execution error: ${err.message}` })
+    if (room.activeRun === runState) room.activeRun = null
+  })
+
+  py.on('close', (code) => {
+    if (room.activeRun !== runState) return
+    if (room.activeRun === runState) room.activeRun = null
+    broadcastToRoom(room, { type: 'exit', code })
+    try { fs.unlinkSync(tmpFile) } catch (e) { }
   })
 
   return runState
@@ -176,7 +216,7 @@ function startInteractiveDockerRun(roomId, language, sourceCode) {
   const imageMap = {
     python: 'python:3.11-alpine',
     javascript: 'node:20-alpine',
-    java: 'eclipse-temurin:21-jdk-alpine' 
+    java: 'eclipse-temurin:21-jdk-alpine'
   }
 
   const image = imageMap[language]
@@ -214,6 +254,13 @@ function startInteractiveDockerRun(roomId, language, sourceCode) {
 
   docker.stderr.on('data', (chunk) => {
     const text = chunk.toString()
+    // If docker daemon is not running, fall back gracefully for python
+    if (text.includes('open //./pipe/dockerDesktopLinuxEngine') && language === 'python') {
+      console.log('[executor] Docker Desktop daemon not running, falling back to local Python')
+      startNativePythonRun(roomId, sourceCode)
+      return
+    }
+
     const ignorePatterns = [
       /Pulling/i, /Pull complete/i, /Unable to find image/i,
       /Digest:/i, /Status:/i, /layer/i, /Downloading/i,
@@ -229,6 +276,10 @@ function startInteractiveDockerRun(roomId, language, sourceCode) {
 
   docker.on('error', (error) => {
     if (room.activeRun !== runState) return
+    if (language === 'python') {
+      startNativePythonRun(roomId, sourceCode)
+      return
+    }
     broadcastToRoom(room, { type: 'error', message: error.message || 'Docker execution failed' })
     if (room.activeRun === runState) room.activeRun = null
   })
@@ -262,10 +313,12 @@ wss.on('connection', (socket, request) => {
 
       if (parsed?.type === 'run' && typeof parsed.language === 'string' && typeof parsed.sourceCode === 'string') {
         const lang = parsed.language.toLowerCase()
-if (lang === 'c' || lang === 'cpp') {
+        if (lang === 'c' || lang === 'cpp') {
           startNativeRun(roomId, lang, parsed.sourceCode)
         } else if (lang === 'javascript') {
           startNodeRun(roomId, parsed.sourceCode)
+        } else if (lang === 'python') {
+          startInteractiveDockerRun(roomId, lang, parsed.sourceCode)
         } else {
           startInteractiveDockerRun(roomId, lang, parsed.sourceCode)
         }

@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { ref, onValue, set, update, onDisconnect } from 'firebase/database'
+import { ref, onValue, set, update, remove, onDisconnect } from 'firebase/database'
 import { onAuthStateChanged } from 'firebase/auth'
 import { database, auth } from '../firebase/config'
 
@@ -15,21 +15,36 @@ export default function useRoom(roomId) {
   const [users, setUsers] = useState(DEFAULT_ROOM.users)
   const [name, setName] = useState(null)
 
+  const isLocalChange = useRef(false)
+  const codeRef = useRef(DEFAULT_ROOM.code)
+  const languageRef = useRef(DEFAULT_ROOM.language)
   const debounceRef = useRef(null)
   const unsubscribeRef = useRef(null)
+
+  // Keep refs updated with current state
+  useEffect(() => {
+    codeRef.current = code
+  }, [code])
+
+  useEffect(() => {
+    languageRef.current = language
+  }, [language])
 
   useEffect(() => {
     if (!roomId) return undefined
 
-    // If Firebase realtime `database` is not configured, fall back to local in-memory/localStorage room state.
+    // If Firebase realtime database is not configured, fall back to localStorage
     if (!database) {
-      // Try to read a cached room from localStorage
       try {
         const cached = localStorage.getItem(`rooms/${roomId}`)
         if (cached) {
           const val = JSON.parse(cached)
-          setCode(val.code ?? DEFAULT_ROOM.code)
-          setLanguage(val.language ?? DEFAULT_ROOM.language)
+          const nextCode = val.code ?? DEFAULT_ROOM.code
+          const nextLang = val.language ?? DEFAULT_ROOM.language
+          codeRef.current = nextCode
+          languageRef.current = nextLang
+          setCode(nextCode)
+          setLanguage(nextLang)
           setUsers(val.users ?? DEFAULT_ROOM.users)
         } else {
           setCode(DEFAULT_ROOM.code)
@@ -42,8 +57,29 @@ export default function useRoom(roomId) {
         setUsers(DEFAULT_ROOM.users)
       }
 
-      // No realtime listener; just provide a cleanup function
+      // Storage event listener for cross-tab collaboration in guest mode
+      const handleStorage = (e) => {
+        if (e.key === `rooms/${roomId}` && e.newValue) {
+          try {
+            const val = JSON.parse(e.newValue)
+            if (val.language && val.language !== languageRef.current) {
+              languageRef.current = val.language
+              setLanguage(val.language)
+            }
+            if (val.code !== undefined && !isLocalChange.current && val.code !== codeRef.current) {
+              codeRef.current = val.code
+              setCode(val.code)
+            }
+            if (val.users) {
+              setUsers(val.users)
+            }
+          } catch {}
+        }
+      }
+      window.addEventListener('storage', handleStorage)
+
       return () => {
+        window.removeEventListener('storage', handleStorage)
         if (debounceRef.current) {
           clearTimeout(debounceRef.current)
           debounceRef.current = null
@@ -51,32 +87,60 @@ export default function useRoom(roomId) {
       }
     }
 
-    const roomRef = ref(database, `rooms/${roomId}`)
+    const roomRef = ref(database, 'rooms/' + roomId)
 
-    // Listen for realtime updates
+    // Listen for realtime updates from Firebase
     const unsub = onValue(roomRef, (snap) => {
       if (!snap.exists()) {
-        // create the room with default values if it doesn't exist
         set(roomRef, DEFAULT_ROOM).catch((err) => console.error('Failed to create room', err))
         setCode(DEFAULT_ROOM.code)
+        codeRef.current = DEFAULT_ROOM.code
         setLanguage(DEFAULT_ROOM.language)
+        languageRef.current = DEFAULT_ROOM.language
         setUsers(DEFAULT_ROOM.users)
         setName(null)
         return
       }
 
-      const val = snap.val()
-      setCode(val.code ?? DEFAULT_ROOM.code)
-      setLanguage(val.language ?? DEFAULT_ROOM.language)
-      setUsers(val.users ?? DEFAULT_ROOM.users)
+      const val = snap.val() || {}
+
+      // Update language when changed remotely
+      if (val.language && val.language !== languageRef.current) {
+        languageRef.current = val.language
+        setLanguage(val.language)
+      }
+
+      // Update code when changed remotely (only if not local change)
+      if (val.code !== undefined) {
+        if (isLocalChange.current) {
+          // If the Firebase update reflects our local code, clear the local change flag
+          if (val.code === codeRef.current) {
+            isLocalChange.current = false
+          }
+        } else {
+          // Remote update from another user
+          if (val.code !== codeRef.current) {
+            codeRef.current = val.code
+            setCode(val.code)
+          }
+        }
+      }
+
+      // Update users and name
+      if (val.users !== undefined) {
+        setUsers(val.users || {})
+      }
       setName(val.name ?? null)
     })
 
     unsubscribeRef.current = unsub
 
     return () => {
-      // cleanup listener and pending debounce
-      unsubscribeRef.current?.()
+      // Ensure listener is cleaned up properly on unmount
+      if (typeof unsubscribeRef.current === 'function') {
+        unsubscribeRef.current()
+        unsubscribeRef.current = null
+      }
       if (debounceRef.current) {
         clearTimeout(debounceRef.current)
         debounceRef.current = null
@@ -88,22 +152,24 @@ export default function useRoom(roomId) {
   useEffect(() => {
     if (!roomId) return undefined
 
-    // Generate or retrieve guest session ID
-    const sessionKey = `guest_${roomId}`
+    // For guests generate a session ID: 'guest_' + Math.random().toString(36).substr(2, 9)
+    // stored in sessionStorage so it persists across re-renders
+    const sessionKey = 'guest_session_id'
     let guestId = sessionStorage.getItem(sessionKey)
     if (!guestId) {
-      guestId = 'guest_' + Math.random().toString(36).substring(2, 9)
+      guestId = 'guest_' + Math.random().toString(36).substr(2, 9)
       sessionStorage.setItem(sessionKey, guestId)
     }
 
-    let currentPresenceRef = null
+    let userPresenceRef = null
 
-    const writePresence = (user) => {
-      const userId = user?.uid || guestId
-      const displayName = user?.displayName || (user?.email ? user.email.split('@')[0] : 'Guest')
+    const writePresence = (currentUser) => {
+      // For signed-in users use auth.currentUser.uid as userId, else guestId
+      const userId = currentUser?.uid || guestId
+      const displayName = currentUser?.displayName || (currentUser?.email ? currentUser.email.split('@')[0] : 'Guest')
       const presenceData = {
         online: true,
-        displayName: displayName,
+        displayName,
         joinedAt: new Date().toISOString()
       }
 
@@ -115,18 +181,19 @@ export default function useRoom(roomId) {
         return () => {}
       }
 
-      const userPresenceRef = ref(database, `rooms/${roomId}/users/${userId}`)
-      currentPresenceRef = userPresenceRef
+      userPresenceRef = ref(database, `rooms/${roomId}/users/${userId}`)
 
+      // On mount write to rooms/{roomId}/users/{userId} with { online: true, displayName, joinedAt }
       set(userPresenceRef, presenceData).catch((err) => console.error('Failed to set user presence', err))
 
+      // Use onDisconnect().remove() to clean up
       onDisconnect(userPresenceRef)
         .remove()
         .catch((err) => console.error('Failed to set onDisconnect', err))
 
       return () => {
-        if (currentPresenceRef) {
-          set(currentPresenceRef, null).catch(() => {})
+        if (userPresenceRef) {
+          remove(userPresenceRef).catch(() => {})
         }
       }
     }
@@ -153,8 +220,11 @@ export default function useRoom(roomId) {
 
   const updateCode = useCallback(
     (newCode) => {
+      isLocalChange.current = true
+      codeRef.current = newCode
       setCode(newCode)
-      // debounce writes to firebase (or localStorage fallback)
+
+      // Debounce writes to 300ms — does not block reads
       if (debounceRef.current) clearTimeout(debounceRef.current)
       debounceRef.current = setTimeout(() => {
         if (database) {
@@ -178,9 +248,12 @@ export default function useRoom(roomId) {
   const updateLanguage = useCallback(
     (newLanguage) => {
       setLanguage(newLanguage)
+      languageRef.current = newLanguage
+
       if (database) {
-        const roomRef = ref(database, `rooms/${roomId}`)
-        update(roomRef, { language: newLanguage }).catch((err) => console.error('Failed to update language', err))
+        // Writes new language to Firebase at rooms/{roomId}/language
+        const langRef = ref(database, `rooms/${roomId}/language`)
+        set(langRef, newLanguage).catch((err) => console.error('Failed to update language', err))
       } else {
         try {
           const cached = JSON.parse(localStorage.getItem(`rooms/${roomId}`) || '{}')
@@ -230,5 +303,5 @@ export default function useRoom(roomId) {
     [roomId]
   )
 
-  return { code, language, users, name, updateCode, updateLanguage, updateRoomName }
+  return { code, language, users, name, updateCode, updateLanguage, updateRoomName, isLocalChange }
 }

@@ -40,11 +40,15 @@
   --shadow-lg: 0 20px 48px rgba(90, 48, 32, 0.16);
 }
 
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
   padding: 0;
@@ -60,7 +64,10 @@ a {
   text-decoration: none;
 }
 
-button, input, select, textarea {
+button,
+input,
+select,
+textarea {
   font-family: inherit;
 }
 
@@ -330,7 +337,8 @@ button, input, select, textarea {
   margin-right: 4px;
 }
 
-.avatar-circle, .user-avatar {
+.avatar-circle,
+.user-avatar {
   width: 32px;
   height: 32px;
   border-radius: 50%;

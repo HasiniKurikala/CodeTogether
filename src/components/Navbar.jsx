@@ -38,10 +38,21 @@ function MoonIcon() {
   )
 }
 
-export default function Navbar({ roomId, onRun, onShare }) {
+export default function Navbar({
+  roomId,
+  language: propLanguage,
+  users: propUsers,
+  updateLanguage: propUpdateLanguage,
+  onRun,
+  onShare
+}) {
   const navigate = useNavigate()
   const { theme, toggleTheme } = useTheme()
-  const { language, users, updateLanguage, code } = useRoom(roomId)
+  const room = useRoom(!propLanguage ? roomId : null)
+  const language = propLanguage ?? room.language
+  const users = propUsers ?? room.users
+  const updateLanguage = propUpdateLanguage ?? room.updateLanguage
+  const code = room.code
 
   const [isEditingRoomId, setIsEditingRoomId] = useState(false)
   const [newRoomIdInput, setNewRoomIdInput] = useState('')
@@ -103,7 +114,7 @@ export default function Navbar({ roomId, onRun, onShare }) {
           } else {
             localStorage.setItem(`rooms/${trimmed}`, JSON.stringify({ code, language, users: {} }))
           }
-        } catch {}
+        } catch { }
       }
 
       setIsEditingRoomId(false)

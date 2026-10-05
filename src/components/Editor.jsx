@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useRef, useEffect } from 'react'
 import MonacoEditor from '@monaco-editor/react'
 import { useTheme } from '../context/ThemeContext'
 
@@ -6,11 +6,13 @@ export default function Editor({
   code = '// Start coding here...\n',
   language = 'javascript',
   fontSize = 14,
-  onChange = () => {},
+  onChange = () => { },
   readOnly = false,
-  onMount = () => {}
+  onMount = () => { }
 }) {
   const { theme } = useTheme()
+  const editorRef = useRef(null)
+  const monacoRef = useRef(null)
 
   const handleBeforeMount = (monaco) => {
     // Dark Theme - Warm Coral
@@ -62,18 +64,31 @@ export default function Editor({
     })
   }
 
-  // Monaco language identifier mapping
-  const monacoLanguage = language === 'c' || language === 'cpp' ? 'cpp' : language
+  const handleEditorDidMount = (editor, monaco) => {
+    editorRef.current = editor
+    monacoRef.current = monaco
+    onMount(editor, monaco)
+  }
+
+  // Ensure model language updates whenever the language prop changes
+  useEffect(() => {
+    if (editorRef.current && monacoRef.current) {
+      const model = editorRef.current.getModel()
+      if (model) {
+        monacoRef.current.editor.setModelLanguage(model, language)
+      }
+    }
+  }, [language])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%' }}>
       <div style={{ flex: 1, overflow: 'hidden' }}>
         <MonacoEditor
           height="100%"
-          language={monacoLanguage}
+          language={language}
           value={code}
           beforeMount={handleBeforeMount}
-          onMount={onMount}
+          onMount={handleEditorDidMount}
           onChange={(value) => onChange({ code: value || '', language })}
           theme={theme === 'light' ? 'codetogether-light' : 'codetogether-dark'}
           options={{
